@@ -10,9 +10,11 @@ here we use ChromaDB + Ollama (emb + LLM chat) + Langchain
 
 - DONE : 
     - What are the tokens exchanged with the wallet ?
-
-- Used different methods to import an HTML file
-
+    - Used different Re récursive HTML splitter to import an HTML file
+    - Test, With One Example
+- TODO :
+    - Add from / to information, Smart Contract Transaction address
+    - Add quantity of transaction
 """
 import os
 import time
@@ -61,6 +63,10 @@ collectionname = "tx_test"
 url_test = "https://polygonscan.com/tx/0x99e3c197172b967eb4215249be50034a1696423a9ae805438ae217a501d86aa9"
 file_path_test = "content/file_test_polygonscan.html"  # local download of remote  HTML file
 address_test = "0x8da02d597a2616e9ec0c82b2b8366b00d69da29a"  # address of the wallet to scan
+'''0x8da02D59...0d69da29A received 110.613389293981481481 Aavegotchi F... (FUD)
+0x8da02D59...0d69da29A received 112.471063425925925925 Aavegotchi F... (FOMO)
+0x8da02D59...0d69da29A received 25.951873206018518518 Aavegotchi A... (ALPHA)
+0x8da02D59...0d69da29A received 10.775977939814814814 Aavegotchi K... (KEK)'''
 # tokens to find for this test
 dict_tokens_to_find = {
     "FOMO":  "0x44a6e0be76e1d9620a7f76588e4509fe4fa8e8c8",
@@ -118,7 +124,7 @@ else:
 loader = TextLoader(file_path_test)
 docs = loader.load()
 text_splitter = RecursiveCharacterTextSplitter.from_language(
-    language=Language.HTML, chunk_size=2500, chunk_overlap=0
+    language=Language.HTML, chunk_size=5000, chunk_overlap=0
 )
 all_splits_raw = text_splitter.split_documents(docs)
 
@@ -190,7 +196,7 @@ llm = Ollama(model=mainmodel, num_ctx=4092)
 
 # TEST 0 :  try to extract FUD, FOMO, KEK, ALPHA from the context
 #  but without specific output format
-print('\nTEST 0 : with chat model : \n')
+print('\nTEST 0 : Get only token names with RAG (VectorDB + Chat LLM) : \n')
 prompt = ChatPromptTemplate.from_template(
     """
     Answer the following question based only on the context provided:
@@ -200,38 +206,42 @@ prompt = ChatPromptTemplate.from_template(
     Question: {input}
     """
 )
-# Stuff all relevant docs (10 in this case)
+# Stuff all relevant docs (all docs in this case)
 document_chain = create_stuff_documents_chain(llm, prompt)
 # Add to the retriever to have the complete chain
 retrieval_chain = create_retrieval_chain(retriever, document_chain)
 # REPONSE TEST :
 results = retrieval_chain.invoke({"input": query})
-print(results["answer"])
-print("\nTEST 0 DONE.\n")
-
-print("\nTEST 1 : CHECK CONTEXT :\n")
+print("\nTEST 0 : CHECK CONTEXT :\n")
 # check context
+n_context_example = None
 for k, doc in enumerate(results["context"]):
     if doc.page_content.find("FUD") != -1:
         print("FOUND FUD in context   : ", k)
+        n_context_example = k
     if doc.page_content.find("FOMO") != -1:
         print("FOUND FOMO in context  : ", k)
     if doc.page_content.find("KEK") != -1:
         print("FOUND KEK in context   : ", k)
     if doc.page_content.find("ALPHA") != -1:
         print("FOUND ALPHA in context : ", k)
+if n_context_example is None:
+    n_context_example = k
+print("\nTEST 0 : RESULTS :\n")
+print(results["answer"])
+print("\nTEST 0 DONE.\n")
 
-# TEST 3 : With output format + 1 example and the last 2 context found : json
-print("\nTEST 3 : With output format on 2 context found and an example : \n")
+# TEST 1 : With output format + 1 example and the last 2 context found : json
+print("\nTEST 1 : With output format on 2 context found and an example : \n")
 # prepare an example :
 results_old = results
-context_ref = results_old["context"][-5].page_content
+context_ref = results_old["context"][n_context_example].page_content
 
 for token, address_token in dict_tokens_to_find.items():
     if context_ref.find(token) != -1:
-        print("FOUND TOKEN : ", token)
+        print("EXAMPLE : FOUND TOKEN : ", token)
         if context_ref.find(address_token) != -1:
-            print("FOUND ADDRESS : ", address_token)
+            print("EXAMPLE : FOUND ADDRESS : ", address_token)
             example = f"``` {context_ref} ```"
             output_example = """
             ```json
@@ -254,26 +264,34 @@ prompt_2 = PromptTemplate(
         <context>
         {context}
         </context>
+        <example>
+        This example of html file part:
+        {example}
+        gives the output: 
+        {output_example}
+        </example>
         <instructions>
         {format_instructions}
         </instructions>
         <question>
          {query}
          Don't take wallet address of sender (From) or of receiver (To), but only token address.
-         A symbol of a coin is composed of 3 to 5 characters and use exclusively capital letters of the Latin alphabet (A-Z).
-         A name of a coin is the long format of the symbol
-         An address of a coin is composed of 42 characters and start with 0x
+         A symbol of a coin is a 3 to 5 characters string and use exclusively capital letters of the Latin alphabet (A-Z).
+         A name of a coin is the long format string of the symbol
+         An address of a coin is a 42 characters string starting with 0x
          A coin have only one address, so output only one address per coin.
          As answer, for each coin found, can you give his name, symbol and address.
          Use only this context to answer.
          Do not explain how you have done.
         </question>
         """,
-    input_variables=["query", "context"],
+    input_variables=["query", "example", "output_example", "context"],
     partial_variables={"format_instructions": parser.get_format_instructions()},
 )
 dict_param_prompt_2 = {
     "context": results_old["context"][-2].page_content + results_old["context"][-1].page_content,
+    "example": example,
+    "output_example": output_example,
     "query": query_2,
 }
 
@@ -284,14 +302,15 @@ print("\noutput to parser:\n", output)
 res = parser.invoke(output)
 print("\nAnswer parsed : \n")
 print(res)
-print("\nTEST 3 END")
+print("\nTEST 1 END")
 
-# TEST 4 : With output format on all context found : json
-print("\nTEST 4 : With output format on all docs and without example : \n")
+# TEST 2 : With output format on all context found : json
+print("\nTEST 2 : With output format on all docs and without example : \n")
 starttime = time.time()
 
 # declaration
 dict_token_found = {}
+list_tokens_found = []
 # loop over contexts
 for k, doc in enumerate(all_splits):
     print('\nContext n# ', k)
@@ -299,6 +318,8 @@ for k, doc in enumerate(all_splits):
     dict_param_prompt_2["context"] = doc.page_content
     output = prompt_and_model.invoke(dict_param_prompt_2)
     print("1-Output to parser:\n", output)
+    if k == 13:
+        print(doc.page_content)
     try:
         res = parser.invoke(output)
         print("2-Answer parsed:\n")
@@ -306,10 +327,12 @@ for k, doc in enumerate(all_splits):
         for token in res.tokens:
             if token.symbol not in dict_token_found:
                 dict_token_found[token.symbol] = token.address
+            if token not in list_tokens_found:
+                list_tokens_found.append(token)
     except:
         print("2-NO MORE token found ?")
 print("--- %s seconds ---" % (time.time() - starttime))
-print(dict_token_found)
+print(list_tokens_found)
 ok = 0
 for symbol, expected_value in dict_tokens_to_find.items():
     if symbol in dict_token_found:
@@ -317,8 +340,8 @@ for symbol, expected_value in dict_tokens_to_find.items():
             print(symbol, " : ", dict_token_found[symbol], " OK!")
             ok += 1
 if ok == len(dict_tokens_to_find):
-    print("TEST 4 OK")
+    print("TEST 2 OK")
 else:
-    print("TEST 4 NOK!")
+    print("TEST 2 NOK!")
 
-print("\nTEST 4 END")
+print("\nTEST 2 END")
