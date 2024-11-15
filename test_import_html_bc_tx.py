@@ -17,6 +17,7 @@ here we use ChromaDB + Ollama (emb + LLM chat) + Langchain
     - Add quantity of transaction
 """
 import os
+import re
 import time
 from libs.utilities import getconfig
 from transformers import GPT2Tokenizer
@@ -78,6 +79,26 @@ dict_tokens_to_find = {
 # Define your desired data structure.
 
 
+def verify_address(address):
+    """
+        Validate that the from address starts with 0x and has a length of 42.
+
+        Args:
+            address (str): The address to validate.
+
+        Returns:
+            str: The validated address.
+
+        Raises:
+            ValueError: If the address is not valid.
+    """
+    if not address.startswith("0x"):
+        raise ValueError("Badly formed from address, should start with 0x")
+    if len(address) != 42:
+        raise ValueError("Badly formed from address, should have a length of 42")
+    return address
+
+
 class TokenData(BaseModel):
     name: str = Field(description="name of the coin found")
     symbol: str = Field(description="symbol of the coin found")
@@ -87,13 +108,27 @@ class TokenData(BaseModel):
     @validator("address")
     def address_start_with_0x(cls, field):
         """Check address format"""
-        if field[:2] != "0x":
-            raise ValueError("Badly formed address!")
-        return field
+        return verify_address(field)
 
 
 class ListTokenData(BaseModel):
     tokens: List[TokenData] = Field(description="list of coins found")
+
+
+class TransactionData(BaseModel):
+    from_address: str = Field(description="from address")
+    to_address: str = Field(description="to address")
+    token: TokenData = Field(description="coin transfered")
+    value: float = Field(description="number of coins transfered")
+
+    @validator("to_address", "from_address", allow_reuse=True)
+    def address_start_with_0x(cls, field):
+        """Check address format"""
+        return verify_address(field)
+
+
+class ListTxData(BaseModel):
+    txs: List[TransactionData] = Field(description="list of transactions found")
 
 
 # Download with BeautyfulSoup
@@ -128,10 +163,18 @@ text_splitter = RecursiveCharacterTextSplitter.from_language(
 )
 all_splits_raw = text_splitter.split_documents(docs)
 
-# Filter only chuncks with address test
+# Filter only chuncks with address test and "from" / "to"
 # filter_transformer = FiltreDocumentTransformer(address_test)
 # all_splits = filter_transformer.transform_documents(all_splits)
-all_splits = [doc for doc in all_splits_raw if address_test in doc.page_content]
+# all_splits = [doc for doc in all_splits_raw if address_test in doc.page_content]
+
+all_splits = [
+    doc for doc in all_splits_raw
+    if (address_test in doc.page_content and (
+        re.search(r"\to\b", doc.page_content, re.IGNORECASE) or
+        re.search(r"\bfrom\b", doc.page_content, re.IGNORECASE)))
+]
+
 nb_char = len(all_splits[5].page_content)
 tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
 tokens = tokenizer.encode(all_splits[5].page_content)
@@ -246,9 +289,14 @@ for token, address_token in dict_tokens_to_find.items():
             output_example = """
             ```json
             {
-            "name": [""" + '"Aavegotchi ' + token + '"' + """],
-            "symbol": [""" + '"' + token + '"' + """],
-            "address": [""" + '"' + address_token + '"' + """]
+            "from_address": [""" + '"' + "0xed70aa929d4e7af83acef193cd349039abe80c9f" + '"' + """],
+            "to_address": [""" + '"' + address_test + '"' + """],
+            "token": {
+                "name": [""" + '"Aavegotchi ' + token + '"' + """],
+                "symbol": [""" + '"' + token + '"' + """],
+                "address": [""" + '"' + address_token + '"' + """],
+                "value": [" + '28.56' + "]
+            }
             }
             ```
             """
@@ -305,9 +353,45 @@ print(res)
 print("\nTEST 1 END")
 
 # TEST 2 : With output format on all context found : json
-print("\nTEST 2 : With output format on all docs and without example : \n")
+print("\nTEST 2 : With output format on all docs and with example : \n")
 starttime = time.time()
-
+query_3 = f"Find all transactions of coins that were exchanged with this particular wallet '{address_test}' by giving the name, symbol and address of coins transfered , the number of coins and which address is 'from' and which address is 'to'."
+parser = PydanticOutputParser(pydantic_object=ListTxData)
+prompt_3 = PromptTemplate(
+    template="""Answer the following question only based on the context (several pieces of a HTML file) and instructions provided.
+        <context>
+        {context}
+        </context>
+        <example>
+        This example of html file part:
+        {example}
+        gives the output: 
+        {output_example}
+        </example>
+        <instructions>
+        {format_instructions}
+        </instructions>
+        <question>
+         {query}
+         Get the sender address (From) and receiver address (To) of all transactions if this particular wallet is (From) or (To).
+         A symbol of a coin is a 3 to 5 characters string and use exclusively capital letters of the Latin alphabet (A-Z).
+         A name of a coin is the long format string of the symbol
+         An address of a coin, sender address (From) or receiver address (To) is a 42 characters string starting with 0x
+         A coin have only one address, so output only one address per coin.
+         As answer, for each coin found, can you give his name, symbol and address.
+         Use only this context to answer.
+         Do not explain how you have done.
+        </question>
+        """,
+    input_variables=["query", "example", "output_example", "context"],
+    partial_variables={"format_instructions": parser.get_format_instructions()},
+)
+dict_param_prompt_3 = {
+    "context": results_old["context"][-2].page_content + results_old["context"][-1].page_content,
+    "example": example,
+    "output_example": output_example,
+    "query": query_3,
+}
 # declaration
 dict_token_found = {}
 list_tokens_found = []
@@ -315,11 +399,11 @@ list_tokens_found = []
 for k, doc in enumerate(all_splits):
     print('\nContext n# ', k)
     # find token symbol and address
-    dict_param_prompt_2["context"] = doc.page_content
-    output = prompt_and_model.invoke(dict_param_prompt_2)
+    dict_param_prompt_3["context"] = doc.page_content
+    output = prompt_and_model.invoke(dict_param_prompt_3)
     print("1-Output to parser:\n", output)
-    if k == 13:
-        print(doc.page_content)
+    # if k == 13:
+    #    print(doc.page_content)
     try:
         res = parser.invoke(output)
         print("2-Answer parsed:\n")
